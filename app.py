@@ -15,7 +15,58 @@ DATA_FILE = Path("gym_daten.json")
 STACK_FILE = Path("mein_supplement_stack.json")
 EXERCISES_FILE = Path("meine_uebungen.json")
 WEIGHT_FILE = Path("koerpergewicht.json")
+import psycopg2
 
+def load_workouts_db():
+    cfg = st.secrets["postgres"]
+    conn = psycopg2.connect(
+        host=cfg["host"],
+        port=int(cfg["port"]),
+        dbname=cfg["dbname"],
+        user=cfg["user"],
+        password=cfg["password"],
+        sslmode="require",
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT datum, uebung, gewicht, wiederholungen FROM workouts ORDER BY id ASC")
+            rows = cur.fetchall()
+        return [
+            {
+                "datum": r[0],
+                "trainingstag": "Trainingstag",
+                "uebung": r[1],
+                "saetze": 1,
+                "wiederholungen": int(r[3]),
+                "gewicht_kg": float(r[2]),
+                "volumen_kg": float(r[2]) * int(r[3]),
+                "geschaetzt_1rm_kg": round(estimate_1rm(float(r[2]), int(r[3])), 1),
+                "notiz": "",
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+def save_workout_db(datum_str, uebung_str, gewicht_val, wdh_val):
+    cfg = st.secrets["postgres"]
+    conn = psycopg2.connect(
+        host=cfg["host"],
+        port=int(cfg["port"]),
+        dbname=cfg["dbname"],
+        user=cfg["user"],
+        password=cfg["password"],
+        sslmode="require",
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO workouts (datum, uebung, gewicht, wiederholungen) VALUES (%s, %s, %s, %s)",
+                (datum_str, uebung_str, float(gewicht_val), int(wdh_val)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
 DEFAULT_ACTIVE_SUPPS = [
     "Kreatin (Ultrapure Creatine)",
     "Zink",
@@ -519,7 +570,7 @@ def render_muscle_svg(highlight_key: str) -> str:
 
 
 if "entries" not in st.session_state:
-    st.session_state.entries = load_list(DATA_FILE, [])
+    st.session_state.entries = load_workouts_db()
 
 if "active_supps" not in st.session_state:
     st.session_state.active_supps = load_list(STACK_FILE, DEFAULT_ACTIVE_SUPPS)
@@ -716,6 +767,7 @@ with tab_live:
                         "notiz": note_val.strip(),
                     })
                     save_json(DATA_FILE, st.session_state.entries)
+                    save_workout_db(entry_date.isoformat(), final_ex, weight_val, reps_val)
                     st.session_state["focus_exercise"] = final_ex
                     st.success(f"Gespeichert: {final_ex} ({weight_val} kg × {reps_val})")
                     st.rerun()
