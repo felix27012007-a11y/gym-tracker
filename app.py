@@ -15,11 +15,11 @@ DATA_FILE = Path("gym_daten.json")
 STACK_FILE = Path("mein_supplement_stack.json")
 EXERCISES_FILE = Path("meine_uebungen.json")
 WEIGHT_FILE = Path("koerpergewicht.json")
-import psycopg2
+import psycopg
 
 def load_workouts_db():
     cfg = st.secrets["postgres"]
-    conn = psycopg2.connect(
+    conn = psycopg.connect(
         host=cfg["host"],
         port=int(cfg["port"]),
         dbname=cfg["dbname"],
@@ -50,7 +50,7 @@ def load_workouts_db():
 
 def save_workout_db(datum_str, uebung_str, gewicht_val, wdh_val):
     cfg = st.secrets["postgres"]
-    conn = psycopg2.connect(
+    conn = psycopg.connect(
         host=cfg["host"],
         port=int(cfg["port"]),
         dbname=cfg["dbname"],
