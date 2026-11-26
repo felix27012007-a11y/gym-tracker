@@ -753,6 +753,7 @@ nav_items = [
     ("weight", "⚖️ Körpergewicht"),
     ("exercises", "💪 Übungen & Muskeln"),
     ("supps", "💊 Supplemente & Stack"),
+    ("manage", "✏️ Einträge bearbeiten"),
 ]
 nav_cols = st.columns(len(nav_items))
 for col, (view_key, label) in zip(nav_cols, nav_items):
