@@ -1,8 +1,11 @@
 import json
 from datetime import date, timedelta
 from pathlib import Path
+
 import altair as alt
+import numpy as np
 import pandas as pd
+import psycopg
 import streamlit as st
 
 st.set_page_config(
@@ -15,58 +18,7 @@ DATA_FILE = Path("gym_daten.json")
 STACK_FILE = Path("mein_supplement_stack.json")
 EXERCISES_FILE = Path("meine_uebungen.json")
 WEIGHT_FILE = Path("koerpergewicht.json")
-import psycopg
 
-def load_workouts_db():
-    cfg = st.secrets["postgres"]
-    conn = psycopg.connect(
-        host=cfg["host"],
-        port=int(cfg["port"]),
-        dbname=cfg["dbname"],
-        user=cfg["user"],
-        password=cfg["password"],
-        sslmode="require",
-    )
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT datum, uebung, gewicht, wiederholungen FROM workouts ORDER BY id ASC")
-            rows = cur.fetchall()
-        return [
-            {
-                "datum": r[0],
-                "trainingstag": "Trainingstag",
-                "uebung": r[1],
-                "saetze": 1,
-                "wiederholungen": int(r[3]),
-                "gewicht_kg": float(r[2]),
-                "volumen_kg": float(r[2]) * int(r[3]),
-                "geschaetzt_1rm_kg": round(estimate_1rm(float(r[2]), int(r[3])), 1),
-                "notiz": "",
-            }
-            for r in rows
-        ]
-    finally:
-        conn.close()
-
-def save_workout_db(datum_str, uebung_str, gewicht_val, wdh_val):
-    cfg = st.secrets["postgres"]
-    conn = psycopg.connect(
-        host=cfg["host"],
-        port=int(cfg["port"]),
-        dbname=cfg["dbname"],
-        user=cfg["user"],
-        password=cfg["password"],
-        sslmode="require",
-    )
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO workouts (datum, uebung, gewicht, wiederholungen) VALUES (%s, %s, %s, %s)",
-                (datum_str, uebung_str, float(gewicht_val), int(wdh_val)),
-            )
-        conn.commit()
-    finally:
-        conn.close()
 DEFAULT_ACTIVE_SUPPS = [
     "Kreatin (Ultrapure Creatine)",
     "Zink",
@@ -277,6 +229,8 @@ DEFAULT_SELECTED_EXERCISES = [
     ex for group in MUSCLE_GROUPS.values() for ex in group["exercises"]
 ]
 
+SPLIT_PRESETS = ["Push", "Pull", "Beine", "Schultern", "Oberkörper", "Ganzkörper"]
+
 APP_CSS = """
 <style>
     .stApp {
@@ -287,7 +241,7 @@ APP_CSS = """
         color: #f3f6fa;
     }
     .block-container {
-        padding-top: 1.35rem;
+        padding-top: 1.25rem;
         padding-bottom: 3rem;
         max-width: 1360px;
     }
@@ -458,6 +412,13 @@ APP_CSS = """
         padding: 14px;
         text-align: center;
     }
+    .draft-item {
+        background: rgba(13, 18, 26, 0.88);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 16px;
+        padding: 12px 14px;
+        margin-bottom: 8px;
+    }
     div[data-testid="stForm"] {
         background: rgba(18, 24, 33, 0.92);
         border: 1px solid rgba(255, 255, 255, 0.08);
@@ -501,6 +462,97 @@ def estimate_1rm(weight: float, reps: int) -> float:
     return float(weight * (1 + reps / 30.0))
 
 
+def get_db_connection():
+    cfg = st.secrets["postgres"]
+    return psycopg.connect(
+        host=cfg["host"],
+        port=int(cfg["port"]),
+        dbname=cfg["dbname"],
+        user=cfg["user"],
+        password=cfg["password"],
+        sslmode="require",
+    )
+
+
+def infer_split_from_exercise(ex_name: str) -> str:
+    ex_low = (ex_name or "").lower()
+    for group_name, info in MUSCLE_GROUPS.items():
+        for ex in info["exercises"]:
+            if ex.lower() == ex_low:
+                if group_name in ("Brust", "Trizeps"):
+                    return "Push"
+                if group_name in ("Rücken", "Bizeps"):
+                    return "Pull"
+                return group_name
+    if any(k in ex_low for k in ("bank", "butterfly", "trizeps", "dips", "push")):
+        return "Push"
+    if any(k in ex_low for k in ("rudern", "lat", "klimm", "curl", "bizeps", "pull", "kreuzheben")):
+        return "Pull"
+    if any(k in ex_low for k in ("bein", "squat", "kniebeuge", "waden", "hip thrust", "lunges")):
+        return "Beine"
+    if any(k in ex_low for k in ("schulter", "seitheben", "press", "face pull")):
+        return "Schultern"
+    return "Trainingstag"
+
+
+def load_workouts_db():
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT datum, uebung, gewicht, wiederholungen FROM workouts ORDER BY id ASC")
+            rows = cur.fetchall()
+
+        local_meta = load_list(DATA_FILE, [])
+        meta_idx = 0
+        result = []
+        for idx, r in enumerate(rows, start=1):
+            datum_val = str(r[0])
+            uebung_val = str(r[1])
+            gewicht_val = float(r[2])
+            wdh_val = int(r[3])
+
+            split_val = infer_split_from_exercise(uebung_val)
+            satz_nr = 1
+            notiz_val = ""
+            if meta_idx < len(local_meta):
+                m = local_meta[meta_idx]
+                if str(m.get("datum")) == datum_val and str(m.get("uebung")) == uebung_val:
+                    split_val = m.get("trainingstag") or split_val
+                    satz_nr = int(m.get("satz_nr", 1))
+                    notiz_val = m.get("notiz", "")
+                    meta_idx += 1
+
+            result.append({
+                "id": idx,
+                "datum": datum_val,
+                "trainingstag": split_val,
+                "uebung": uebung_val,
+                "satz_nr": satz_nr,
+                "saetze": 1,
+                "wiederholungen": wdh_val,
+                "gewicht_kg": gewicht_val,
+                "volumen_kg": round(gewicht_val * wdh_val, 1),
+                "geschaetzt_1rm_kg": round(estimate_1rm(gewicht_val, wdh_val), 1),
+                "notiz": notiz_val,
+            })
+        return result
+    finally:
+        conn.close()
+
+
+def save_workout_db(datum_str, uebung_str, gewicht_val, wdh_val):
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO workouts (datum, uebung, gewicht, wiederholungen) VALUES (%s, %s, %s, %s)",
+                (datum_str, uebung_str, float(gewicht_val), int(wdh_val)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def render_muscle_svg(highlight_key: str) -> str:
     base_fill = "#243042"
     active_fill = "#2dd4bf"
@@ -518,44 +570,33 @@ def render_muscle_svg(highlight_key: str) -> str:
     return f"""
     <div class="anatomy-box">
         <svg viewBox="0 0 340 210" width="100%" height="205" xmlns="http://www.w3.org/2000/svg">
-            <!-- Vorderansicht (Front) -->
             <text x="85" y="18" fill="#94a3b8" font-size="11" font-weight="700" text-anchor="middle">VORDERSEITE</text>
             <circle cx="85" cy="36" r="11" fill="#334155"/>
             <rect x="78" y="47" width="14" height="7" rx="3" fill="#334155"/>
-            <!-- Brust -->
             <rect x="65" y="55" width="19" height="22" rx="6" fill="{chest_c}"/>
             <rect x="86" y="55" width="19" height="22" rx="6" fill="{chest_c}"/>
-            <!-- Schultern vorn -->
             <ellipse cx="57" cy="61" rx="8" ry="9" fill="{shoulders_f}"/>
             <ellipse cx="113" cy="61" rx="8" ry="9" fill="{shoulders_f}"/>
-            <!-- Bizeps vorn -->
             <rect x="47" y="72" width="10" height="24" rx="5" fill="{biceps_c}"/>
             <rect x="113" y="72" width="10" height="24" rx="5" fill="{biceps_c}"/>
             <rect x="44" y="99" width="9" height="28" rx="4" fill="#1e293b"/>
             <rect x="117" y="99" width="9" height="28" rx="4" fill="#1e293b"/>
-            <!-- Rumpf -->
             <rect x="69" y="79" width="32" height="36" rx="7" fill="#1e293b"/>
-            <!-- Beine vorn -->
             <rect x="67" y="118" width="15" height="44" rx="7" fill="{legs_f}"/>
             <rect x="88" y="118" width="15" height="44" rx="7" fill="{legs_f}"/>
             <rect x="68" y="165" width="13" height="34" rx="6" fill="{legs_f}"/>
             <rect x="89" y="165" width="13" height="34" rx="6" fill="{legs_f}"/>
 
-            <!-- Rückansicht (Back) -->
             <text x="255" y="18" fill="#94a3b8" font-size="11" font-weight="700" text-anchor="middle">RÜCKSEITE</text>
             <circle cx="255" cy="36" r="11" fill="#334155"/>
             <rect x="248" y="47" width="14" height="7" rx="3" fill="#334155"/>
-            <!-- Rücken / Lat -->
             <polygon points="234,55 276,55 268,108 242,108" fill="{back_c}"/>
-            <!-- Schultern hinten -->
             <ellipse cx="227" cy="61" rx="8" ry="9" fill="{shoulders_b}"/>
             <ellipse cx="283" cy="61" rx="8" ry="9" fill="{shoulders_b}"/>
-            <!-- Trizeps hinten -->
             <rect x="217" y="72" width="10" height="24" rx="5" fill="{triceps_c}"/>
             <rect x="283" y="72" width="10" height="24" rx="5" fill="{triceps_c}"/>
             <rect x="214" y="99" width="9" height="28" rx="4" fill="#1e293b"/>
             <rect x="287" y="99" width="9" height="28" rx="4" fill="#1e293b"/>
-            <!-- Beine / Glutes / Waden hinten -->
             <rect x="237" y="118" width="15" height="44" rx="7" fill="{legs_b}"/>
             <rect x="258" y="118" width="15" height="44" rx="7" fill="{legs_b}"/>
             <rect x="238" y="165" width="13" height="34" rx="6" fill="{legs_b}"/>
@@ -569,8 +610,28 @@ def render_muscle_svg(highlight_key: str) -> str:
     """
 
 
+def add_trendline_df(session_df: pd.DataFrame) -> pd.DataFrame:
+    if len(session_df) < 2:
+        out = session_df.copy()
+        out["trend_vol"] = out["volumen_kg"]
+        return out
+    ordered = session_df.sort_values("datum_dt").copy()
+    x_num = np.arange(len(ordered), dtype=float)
+    y_val = ordered["volumen_kg"].astype(float).to_numpy()
+    slope, intercept = np.polyfit(x_num, y_val, 1)
+    ordered["trend_vol"] = np.round(intercept + slope * x_num, 1)
+    return ordered
+
+
+# --- State Initialisierung ---
 if "entries" not in st.session_state:
     st.session_state.entries = load_workouts_db()
+
+if "session_draft" not in st.session_state:
+    st.session_state.session_draft = []
+
+if "active_view" not in st.session_state:
+    st.session_state.active_view = "workout"
 
 if "active_supps" not in st.session_state:
     st.session_state.active_supps = load_list(STACK_FILE, DEFAULT_ACTIVE_SUPPS)
@@ -583,7 +644,8 @@ if "bodyweight_logs" not in st.session_state:
 
 st.markdown(APP_CSS, unsafe_allow_html=True)
 
-total_sets = sum(int(e.get("saetze", 0)) for e in st.session_state.entries)
+today = date.today()
+total_sets = len(st.session_state.entries)
 total_volume = sum(float(e.get("volumen_kg", 0.0)) for e in st.session_state.entries)
 trained_dates = {e.get("datum") for e in st.session_state.entries if e.get("datum")}
 total_sessions = len({
@@ -597,17 +659,19 @@ latest_bw_str = (
     else "—"
 )
 
+# --- Header ---
 st.markdown(
     """
     <div class="app-header">
-        <div class="app-badge">PULSE · WORKOUT, ÜBUNGEN, SUPPS &amp; WEIGHT</div>
+        <div class="app-badge">PULSE · GYM, ÜBUNGEN, SUPPS &amp; WEIGHT</div>
         <h1 class="app-title">Dein persönliches Gym-Dashboard</h1>
-        <p class="app-sub">Sätze loggen, Kurven direkt nebenan verfolgen, Übungen &amp; Supplemente an-/abwählen und Körpergewicht auswerten.</p>
+        <p class="app-sub">Wähle gezielt einen Bereich aus, um übersichtlich zu loggen, Einheiten zu vergleichen und deine Aktivität zu prüfen.</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
+# --- Kompakte Kennzahlen ---
 k1, k2, k3, k4 = st.columns(4)
 with k1:
     st.markdown(
@@ -654,159 +718,385 @@ with k4:
         unsafe_allow_html=True,
     )
 
-today = date.today()
-monday = today - timedelta(days=today.weekday())
-day_labels = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
-pills_html = ['<div class="surface-card"><div class="tile-label">Aktuelle Woche · Trainingsaktivität</div><div class="week-row">']
-for offset, label in enumerate(day_labels):
-    d = monday + timedelta(days=offset)
-    is_done = d.isoformat() in trained_dates
-    is_today = d == today
-    cls = "day-pill"
-    if is_done:
-        cls += " day-pill-done"
-    if is_today:
-        cls += " day-pill-today"
-    symbol = "✓" if is_done else str(d.day)
-    pills_html.append(
-        f'<div class="{cls}"><div class="day-name">{label} {d.day}.</div><div class="day-circle">{symbol}</div></div>'
-    )
-pills_html.append("</div></div>")
-st.markdown("".join(pills_html), unsafe_allow_html=True)
+st.write("")
 
-tab_live, tab_exercises, tab_weight, tab_history, tab_supps = st.tabs([
-    "Sätze & Live-Statistik",
-    "Übungen & Muskelgruppen",
-    "Körpergewicht",
-    "Verlauf & Einträge",
-    "Supplemente & Stack",
-])
+# --- Haupt-Auswahlkacheln (spaltet die Ansicht auf) ---
+nav_items = [
+    ("workout", "🏋️ Training eintragen"),
+    ("analytics", "📈 Kurven & Vergleiche"),
+    ("activity", "📅 Trainingsaktivität"),
+    ("weight", "⚖️ Körpergewicht"),
+    ("exercises", "💪 Übungen & Muskeln"),
+    ("supps", "💊 Supplemente & Stack"),
+]
+nav_cols = st.columns(len(nav_items))
+for col, (view_key, label) in zip(nav_cols, nav_items):
+    is_active = st.session_state.active_view == view_key
+    if col.button(
+        label,
+        key=f"nav_{view_key}",
+        type="primary" if is_active else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state.active_view = view_key
+        st.rerun()
 
-with tab_live:
-    col_entry, col_chart = st.columns([1.02, 1.38], gap="large")
+st.divider()
 
-    with col_entry:
-        st.markdown("### Neuen Satz eintragen")
-        known_days = sorted({
-            e.get("trainingstag", "").strip()
-            for e in st.session_state.entries
-            if e.get("trainingstag", "").strip()
-        })
-        selectable_ex = sorted(set(st.session_state.selected_exercises) | {
-            e.get("uebung", "").strip()
-            for e in st.session_state.entries
-            if e.get("uebung", "").strip()
-        })
+view = st.session_state.active_view
 
-        with st.form("gym_set_form", clear_on_submit=True):
-            entry_date = st.date_input("Datum", value=today)
+# ==============================================================================
+# 1. TRAINING EINTRAGEN (Ganzes Training am Stück + dynamische Sätze)
+# ==============================================================================
+if view == "workout":
+    left_col, right_col = st.columns([1.15, 1.05], gap="large")
 
-            if known_days:
-                pick_day = st.selectbox(
-                    "Trainingstag wählen",
-                    ["— Neu eingeben —"] + known_days,
-                )
-            else:
-                pick_day = "— Neu eingeben —"
-
-            custom_day = st.text_input(
-                "Trainingstag / Split",
-                placeholder="z. B. Push, Pull, Leg Day, Oberkörper",
-            )
-
-            if selectable_ex:
-                pick_ex = st.selectbox(
-                    "Übung wählen (aus deinen aktiven Übungen)",
-                    ["— Eigene Übung tippen —"] + selectable_ex,
-                )
-            else:
-                pick_ex = "— Eigene Übung tippen —"
-
-            custom_ex = st.text_input(
-                "Eigene Übung (falls nicht in Liste)",
-                placeholder="z. B. Bankdrücken, Schrägbank, Klimmzüge",
-            )
-
-            c1, c2, c3 = st.columns(3)
-            sets_val = c1.number_input("Sätze", min_value=1, max_value=30, value=3, step=1)
-            reps_val = c2.number_input("Wdh.", min_value=1, max_value=100, value=10, step=1)
-            weight_val = c3.number_input(
-                "Gewicht (kg)", min_value=0.0, max_value=1000.0, value=60.0, step=2.5
-            )
-
-            note_val = st.text_input(
-                "Notiz (optional)", placeholder="z. B. RIR 1, sauberer Satz"
-            )
-
-            submit_set = st.form_submit_button("Satz speichern", use_container_width=True)
-            if submit_set:
-                final_day = (
-                    custom_day.strip()
-                    or ("" if pick_day == "— Neu eingeben —" else pick_day)
-                    or "Trainingstag"
-                )
-                final_ex = (
-                    custom_ex.strip()
-                    or ("" if pick_ex == "— Eigene Übung tippen —" else pick_ex)
-                )
-
-                if not final_ex:
-                    st.warning("Bitte wähle eine Übung oder gib einen Namen ein.")
-                else:
-                    vol = round(int(sets_val) * int(reps_val) * float(weight_val), 1)
-                    e1rm = round(estimate_1rm(float(weight_val), int(reps_val)), 1)
-                    st.session_state.entries.append({
-                        "datum": entry_date.isoformat(),
-                        "trainingstag": final_day,
-                        "uebung": final_ex,
-                        "saetze": int(sets_val),
-                        "wiederholungen": int(reps_val),
-                        "gewicht_kg": float(weight_val),
-                        "volumen_kg": vol,
-                        "geschaetzt_1rm_kg": e1rm,
-                        "notiz": note_val.strip(),
-                    })
-                    save_json(DATA_FILE, st.session_state.entries)
-                    save_workout_db(entry_date.isoformat(), final_ex, weight_val, reps_val)
-                    st.session_state["focus_exercise"] = final_ex
-                    st.success(f"Gespeichert: {final_ex} ({weight_val} kg × {reps_val})")
-                    st.rerun()
-
-    with col_chart:
+    with left_col:
         st.markdown('<div class="surface-card">', unsafe_allow_html=True)
-        st.markdown("### Direkte Statistik")
-        if st.session_state.entries:
-            df = pd.DataFrame(st.session_state.entries)
-            df["datum_dt"] = pd.to_datetime(df["datum"])
-            exercises = sorted(df["uebung"].dropna().unique())
+        st.markdown("### 1. Trainingstag wählen & Übung hinzufügen")
 
+        known_splits = sorted(
+            set(SPLIT_PRESETS)
+            | {
+                e.get("trainingstag", "").strip()
+                for e in st.session_state.entries
+                if e.get("trainingstag", "").strip() and e.get("trainingstag", "").strip() != "Trainingstag"
+            }
+        )
+        selectable_ex = sorted(
+            set(st.session_state.selected_exercises)
+            | {e.get("uebung", "").strip() for e in st.session_state.entries if e.get("uebung", "").strip()}
+        )
+
+        d_col, s_col = st.columns([1, 1.4])
+        session_date = d_col.date_input("Datum", value=today, key="draft_date")
+        chosen_split = s_col.selectbox(
+            "Trainingstag / Split",
+            known_splits + ["Eigener Name…"],
+            key="draft_split_select",
+        )
+        if chosen_split == "Eigener Name…":
+            final_split = st.text_input("Eigener Trainingstag / Split", placeholder="z. B. Push A, Schultern & Arme", key="draft_custom_split").strip() or "Trainingstag"
+        else:
+            final_split = chosen_split
+
+        ex_col, set_cnt_col = st.columns([2, 1])
+        pick_ex = ex_col.selectbox(
+            "Übung wählen",
+            selectable_ex + ["— Eigene Übung tippen —"],
+            key="draft_ex_select",
+        )
+        num_sets = int(
+            set_cnt_col.number_input(
+                "Anzahl Sätze",
+                min_value=1,
+                max_value=8,
+                value=2,
+                step=1,
+                key="draft_num_sets",
+            )
+        )
+
+        if pick_ex == "— Eigene Übung tippen —":
+            custom_ex = st.text_input("Name der eigenen Übung", placeholder="z. B. Schrägbankdrücken", key="draft_custom_ex").strip()
+            exercise_name = custom_ex
+        else:
+            exercise_name = pick_ex
+
+        st.markdown(f"**Sätze für diese Übung ({num_sets} Sätze – jeweils eigenes Gewicht & Wdh.):**")
+
+        set_rows_input = []
+        for s_idx in range(1, num_sets + 1):
+            sc1, sc2, sc3 = st.columns([0.8, 1.2, 1.0])
+            sc1.markdown(f"<div style='padding-top:30px; font-weight:700; color:#5eead4;'>Satz {s_idx}</div>", unsafe_allow_html=True)
+            w_val = sc2.number_input(
+                f"Gewicht Satz {s_idx} (kg)",
+                min_value=0.0,
+                max_value=1000.0,
+                value=60.0,
+                step=2.5,
+                key=f"set_w_{s_idx}",
+            )
+            r_val = sc3.number_input(
+                f"Wdh. Satz {s_idx}",
+                min_value=1,
+                max_value=100,
+                value=10,
+                step=1,
+                key=f"set_r_{s_idx}",
+            )
+            set_rows_input.append((s_idx, float(w_val), int(r_val)))
+
+        draft_note = st.text_input("Notiz zur Übung (optional)", placeholder="z. B. Drop-Set, RIR 1", key="draft_note").strip()
+
+        if st.button("➕ Übung zum aktuellen Training hinzufügen", use_container_width=True):
+            if not exercise_name:
+                st.warning("Bitte wähle eine Übung oder gib einen Namen ein.")
+            else:
+                for s_idx, w_val, r_val in set_rows_input:
+                    st.session_state.session_draft.append({
+                        "datum": session_date.isoformat(),
+                        "trainingstag": final_split,
+                        "uebung": exercise_name,
+                        "satz_nr": s_idx,
+                        "wiederholungen": r_val,
+                        "gewicht_kg": w_val,
+                        "volumen_kg": round(w_val * r_val, 1),
+                        "geschaetzt_1rm_kg": round(estimate_1rm(w_val, r_val), 1),
+                        "notiz": draft_note,
+                    })
+                st.success(f"{exercise_name} ({num_sets} Sätze) zum Training hinzugefügt.")
+                st.rerun()
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with right_col:
+        st.markdown('<div class="surface-card">', unsafe_allow_html=True)
+        st.markdown("### 2. Aktuelles Training (Sammelkorb)")
+
+        draft = st.session_state.session_draft
+        if not draft:
+            st.info("Noch keine Übungen im aktuellen Training. Füge links Übungen hinzu – du kannst mehrere nacheinander sammeln und dann gesammelt speichern.")
+        else:
+            draft_df = pd.DataFrame(draft)
+            draft_vol = float(draft_df["volumen_kg"].sum())
+            st.markdown(
+                f"**{draft[0]['datum']} · {draft[0]['trainingstag']}** — {len(draft)} Sätze · **{draft_vol:,.1f} kg** Gesamtvolumen"
+            )
+
+            for ex_name, grp in draft_df.groupby("uebung", sort=False):
+                parts = [f"S{int(r['satz_nr'])}: {float(r['gewicht_kg']):g} kg × {int(r['wiederholungen'])}" for _, r in grp.iterrows()]
+                note_txt = f" · _{grp.iloc[0]['notiz']}_" if grp.iloc[0].get("notiz") else ""
+                st.markdown(
+                    f"""
+                    <div class="draft-item">
+                        <div style="font-weight:700; color:#ffffff;">{ex_name}{note_txt}</div>
+                        <div style="font-size:0.85rem; color:#94a3b8; margin-top:3px;">{" | ".join(parts)}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+            b1, b2 = st.columns([2, 1])
+            if b1.button("💾 Ganzes Training speichern", type="primary", use_container_width=True):
+                for item in draft:
+                    save_workout_db(
+                        item["datum"],
+                        item["uebung"],
+                        item["gewicht_kg"],
+                        item["wiederholungen"],
+                    )
+                    st.session_state.entries.append({
+                        "id": len(st.session_state.entries) + 1,
+                        **item,
+                        "saetze": 1,
+                    })
+                save_json(DATA_FILE, st.session_state.entries)
+                st.session_state["focus_exercise"] = draft[-1]["uebung"]
+                st.session_state.session_draft = []
+                st.success("Training komplett in Supabase gespeichert!")
+                st.rerun()
+
+            if b2.button("Verwerfen", use_container_width=True):
+                st.session_state.session_draft = []
+                st.rerun()
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ==============================================================================
+# 2. KURVEN & VERGLEICHE (Trainingstage vergleichen, Übung, Split-Trendlinien)
+# ==============================================================================
+elif view == "analytics":
+    if not st.session_state.entries:
+        st.info("Es sind noch keine Trainingssätze vorhanden. Lege zuerst unter **Training eintragen** Sätze an.")
+    else:
+        df = pd.DataFrame(st.session_state.entries)
+        df["datum_dt"] = pd.to_datetime(df["datum"])
+        df["session_label"] = df["datum"].astype(str) + " (" + df["trainingstag"].astype(str) + ")"
+
+        sub_mode = st.radio(
+            "Ansicht wählen",
+            [
+                "Gesamtübersicht: Splits & Ausgleichslinie",
+                "Trainingstag mit vorherigem vergleichen",
+                "Einzelne Übung im Detail",
+            ],
+            horizontal=True,
+        )
+
+        # --- A: Gesamtübersicht aller Splits/Trainingstage mit Ausgleichslinie ---
+        if sub_mode == "Gesamtübersicht: Splits & Ausgleichslinie":
+            st.markdown('<div class="surface-card">', unsafe_allow_html=True)
+            st.markdown("### Verlaufskurven der einzelnen Trainingstage / Splits + Ausgleichslinie")
+
+            session_summary = (
+                df.groupby(["datum", "datum_dt", "trainingstag", "session_label"], as_index=False)
+                .agg(
+                    volumen_kg=("volumen_kg", "sum"),
+                    saetze=("uebung", "count"),
+                    max_gewicht_kg=("gewicht_kg", "max"),
+                )
+                .sort_values("datum_dt")
+            )
+
+            available_splits = sorted(session_summary["trainingstag"].unique())
+            chosen_splits = st.multiselect(
+                "Splits / Trainingstage einblenden (jeweils eigene Farbe)",
+                available_splits,
+                default=available_splits,
+            )
+
+            filtered_sessions = session_summary[session_summary["trainingstag"].isin(chosen_splits)].copy()
+            if filtered_sessions.empty:
+                st.warning("Bitte mindestens einen Split auswählen.")
+            else:
+                metric_choice = st.selectbox(
+                    "Kennzahl für die Kurven",
+                    ["volumen_kg", "saetze", "max_gewicht_kg"],
+                    format_func=lambda k: {
+                        "volumen_kg": "Gesamtvolumen pro Einheit (kg)",
+                        "saetze": "Anzahl Sätze pro Einheit",
+                        "max_gewicht_kg": "Höchstes Gewicht der Einheit (kg)",
+                    }[k],
+                )
+                filtered_sessions["wert"] = filtered_sessions[metric_choice]
+
+                # Ausgleichslinie über den zeitlichen Verlauf
+                trend_df = add_trendline_df(filtered_sessions.assign(volumen_kg=filtered_sessions["wert"]))
+
+                split_lines = (
+                    alt.Chart(filtered_sessions)
+                    .mark_line(point=alt.OverlayMarkDef(size=70), strokeWidth=3)
+                    .encode(
+                        x=alt.X("datum_dt:T", title="Datum"),
+                        y=alt.Y("wert:Q", title="Wert", scale=alt.Scale(zero=False)),
+                        color=alt.Color("trainingstag:N", title="Trainingstag / Split"),
+                        tooltip=[
+                            alt.Tooltip("datum:N", title="Datum"),
+                            alt.Tooltip("trainingstag:N", title="Split"),
+                            alt.Tooltip("wert:Q", title="Wert"),
+                            alt.Tooltip("saetze:Q", title="Sätze"),
+                        ],
+                    )
+                )
+
+                trend_line = (
+                    alt.Chart(trend_df)
+                    .mark_line(strokeDash=[6, 4], strokeWidth=2.5, color="#f59e0b")
+                    .encode(
+                        x=alt.X("datum_dt:T"),
+                        y=alt.Y("trend_vol:Q"),
+                        tooltip=[alt.Tooltip("trend_vol:Q", title="Ausgleichslinie")],
+                    )
+                )
+
+                chart_all = (
+                    (split_lines + trend_line)
+                    .properties(height=340)
+                    .configure_view(strokeOpacity=0)
+                    .configure_axis(
+                        gridColor="rgba(148,163,184,0.12)",
+                        labelColor="#94a3b8",
+                        titleColor="#cbd5e1",
+                    )
+                )
+                st.altair_chart(chart_all, use_container_width=True)
+                st.caption("Gestrichelte gelbe Linie = lineare Ausgleichslinie (Gesamttrend über die ausgewählten Einheiten).")
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # --- B: Einzelnen Trainingstag direkt mit dem davor vergleichen ---
+        elif sub_mode == "Trainingstag mit vorherigem vergleichen":
+            st.markdown('<div class="surface-card">', unsafe_allow_html=True)
+            st.markdown("### Trainingstag einzeln mit dem vorherigen Trainingstag vergleichen")
+
+            sessions_ordered = (
+                df.groupby(["datum", "datum_dt", "trainingstag", "session_label"], as_index=False)
+                .agg(
+                    volumen_kg=("volumen_kg", "sum"),
+                    saetze=("uebung", "count"),
+                    wdh_gesamt=("wiederholungen", "sum"),
+                    max_gewicht_kg=("gewicht_kg", "max"),
+                )
+                .sort_values("datum_dt")
+                .reset_index(drop=True)
+            )
+
+            labels = sessions_ordered["session_label"].tolist()
+            selected_label = st.selectbox("Trainingstag auswählen", labels, index=len(labels) - 1)
+            idx_curr = labels.index(selected_label)
+            curr_row = sessions_ordered.iloc[idx_curr]
+
+            if idx_curr == 0:
+                st.info("Das ist dein ältester geloggter Trainingstag – es gibt noch keinen vorherigen Tag zum Vergleichen.")
+            else:
+                prev_row = sessions_ordered.iloc[idx_curr - 1]
+                vol_diff = float(curr_row["volumen_kg"]) - float(prev_row["volumen_kg"])
+                sets_diff = int(curr_row["saetze"]) - int(prev_row["saetze"])
+                reps_diff = int(curr_row["wdh_gesamt"]) - int(prev_row["wdh_gesamt"])
+                top_diff = float(curr_row["max_gewicht_kg"]) - float(prev_row["max_gewicht_kg"])
+
+                st.caption(f"Vergleich: **{curr_row['session_label']}** vs. vorheriger Tag **{prev_row['session_label']}**")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Volumen", f"{curr_row['volumen_kg']:,.1f} kg", f"{vol_diff:+,.1f} kg")
+                m2.metric("Sätze", f"{int(curr_row['saetze'])}", f"{sets_diff:+d}")
+                m3.metric("Wdh. gesamt", f"{int(curr_row['wdh_gesamt'])}", f"{reps_diff:+d}")
+                m4.metric("Top-Gewicht", f"{curr_row['max_gewicht_kg']:g} kg", f"{top_diff:+g} kg")
+
+                curr_ex = (
+                    df[(df["datum"] == curr_row["datum"]) & (df["trainingstag"] == curr_row["trainingstag"])]
+                    .groupby("uebung", as_index=False)
+                    .agg(
+                        saetze_neu=("uebung", "count"),
+                        vol_neu=("volumen_kg", "sum"),
+                        max_kg_neu=("gewicht_kg", "max"),
+                    )
+                )
+                prev_ex = (
+                    df[(df["datum"] == prev_row["datum"]) & (df["trainingstag"] == prev_row["trainingstag"])]
+                    .groupby("uebung", as_index=False)
+                    .agg(
+                        saetze_vorher=("uebung", "count"),
+                        vol_vorher=("volumen_kg", "sum"),
+                        max_kg_vorher=("gewicht_kg", "max"),
+                    )
+                )
+                comp_ex = pd.merge(curr_ex, prev_ex, on="uebung", how="outer").fillna(0)
+                comp_ex["Volumen_Diff_kg"] = (comp_ex["vol_neu"] - comp_ex["vol_vorher"]).round(1)
+                comp_ex["Max_Kg_Diff"] = (comp_ex["max_kg_neu"] - comp_ex["max_kg_vorher"]).round(1)
+                st.dataframe(comp_ex, use_container_width=True, hide_index=True)
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # --- C: Gesonderte Entwicklung einer einzelnen Übung ---
+        else:
+            st.markdown('<div class="surface-card">', unsafe_allow_html=True)
+            st.markdown("### Entwicklung einer einzelnen Übung")
+
+            exercises = sorted(df["uebung"].dropna().unique())
             default_pos = 0
             if "focus_exercise" in st.session_state and st.session_state["focus_exercise"] in exercises:
                 default_pos = exercises.index(st.session_state["focus_exercise"])
 
-            selected_exercise = st.selectbox(
-                "Übung für Kurve auswählen",
-                exercises,
-                index=default_pos,
-                key="live_curve_ex",
-            )
+            selected_exercise = st.selectbox("Übung auswählen", exercises, index=default_pos)
             ex_df = df[df["uebung"] == selected_exercise].sort_values("datum_dt")
 
             line = (
                 alt.Chart(ex_df)
-                .mark_line(point=alt.OverlayMarkDef(color="#2dd4bf", size=65), color="#2dd4bf", strokeWidth=3)
+                .mark_line(point=alt.OverlayMarkDef(color="#2dd4bf", size=70), color="#2dd4bf", strokeWidth=3)
                 .encode(
                     x=alt.X("datum_dt:T", title="Datum"),
                     y=alt.Y("gewicht_kg:Q", title="Gewicht (kg)", scale=alt.Scale(zero=False)),
                     tooltip=[
                         alt.Tooltip("datum:N", title="Datum"),
-                        alt.Tooltip("trainingstag:N", title="Tag"),
+                        alt.Tooltip("trainingstag:N", title="Split"),
+                        alt.Tooltip("satz_nr:Q", title="Satz"),
                         alt.Tooltip("gewicht_kg:Q", title="Gewicht (kg)"),
-                        alt.Tooltip("saetze:Q", title="Sätze"),
                         alt.Tooltip("wiederholungen:Q", title="Wdh."),
                     ],
                 )
-                .properties(height=255)
+                .properties(height=280)
                 .configure_view(strokeOpacity=0)
                 .configure_axis(
                     gridColor="rgba(148,163,184,0.12)",
@@ -823,350 +1113,223 @@ with tab_live:
                 estimate_1rm(float(r["gewicht_kg"]), int(r["wiederholungen"]))
                 for _, r in ex_df.iterrows()
             )
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Startgewicht", f"{first_kg:g} kg")
+            c2.metric("Aktuell", f"{last_kg:g} kg", f"{last_kg - first_kg:+g} kg")
+            c3.metric("Bestleistung", f"{best_kg:g} kg")
+            c4.metric("Geschätztes 1RM", f"{best_1rm:.1f} kg")
 
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Start", f"{first_kg:.1f} kg")
-            m2.metric("Aktuell", f"{last_kg:.1f} kg", delta=f"{last_kg - first_kg:+.1f} kg")
-            m3.metric("Bestwert (PR)", f"{best_kg:.1f} kg")
-            m4.metric("Est. 1RM", f"{best_1rm:.1f} kg")
-        else:
-            st.info(
-                "Trag links deinen ersten Satz ein – rechts erscheint sofort deine Verlaufskurve, dein PR und dein geschätztes 1RM."
+            st.dataframe(
+                ex_df[["datum", "trainingstag", "satz_nr", "gewicht_kg", "wiederholungen", "volumen_kg", "notiz"]],
+                use_container_width=True,
+                hide_index=True,
             )
-        st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
 
-with tab_exercises:
+
+# ==============================================================================
+# 3. TRAININGSFAKTIVITÄT (Wann und wie oft trainiert)
+# ==============================================================================
+elif view == "activity":
     st.markdown('<div class="surface-card">', unsafe_allow_html=True)
-    st.markdown("### Standard-Übungen nach Muskelgruppe & Muskelansprache")
-    st.caption(
-        "Je 10 Standard-Übungen für Brust, Rücken, Beine, Bizeps, Trizeps und Schultern – inklusive Muskelübersicht und An-/Abwahl für deinen Trainingspool."
-    )
+    st.markdown("### Trainingsaktivität – wann und wie oft du trainiert hast")
 
-    group_names = list(MUSCLE_GROUPS.keys())
-    chosen_group = st.selectbox("Muskelgruppe wählen", group_names)
-    group_info = MUSCLE_GROUPS[chosen_group]
+    monday = today - timedelta(days=today.weekday())
+    day_labels = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+    pills_html = ['<div class="tile-label">Aktuelle Woche</div><div class="week-row">']
+    for offset, label in enumerate(day_labels):
+        d = monday + timedelta(days=offset)
+        is_done = d.isoformat() in trained_dates
+        is_today = d == today
+        cls = "day-pill"
+        if is_done:
+            cls += " day-pill-done"
+        if is_today:
+            cls += " day-pill-today"
+        symbol = "✓" if is_done else str(d.day)
+        pills_html.append(
+            f'<div class="{cls}"><div class="day-name">{label} {d.day}.</div><div class="day-circle">{symbol}</div></div>'
+        )
+    pills_html.append("</div>")
+    st.markdown("".join(pills_html), unsafe_allow_html=True)
 
-    col_vis, col_list = st.columns([1.05, 1.45], gap="large")
-    with col_vis:
-        st.markdown(render_muscle_svg(group_info["highlight"]), unsafe_allow_html=True)
+    st.write("")
+    if not st.session_state.entries:
+        st.info("Noch keine Trainingstage erfasst.")
+    else:
+        df = pd.DataFrame(st.session_state.entries)
+        df["datum_dt"] = pd.to_datetime(df["datum"])
+
+        last_30_cutoff = pd.Timestamp(today - timedelta(days=30))
+        last_7_cutoff = pd.Timestamp(today - timedelta(days=7))
+        days_30 = df[df["datum_dt"] >= last_30_cutoff]["datum"].nunique()
+        days_7 = df[df["datum_dt"] >= last_7_cutoff]["datum"].nunique()
+        days_total = df["datum"].nunique()
+
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Trainingstage (letzte 7 Tage)", f"{days_7} Tage")
+        a2.metric("Trainingstage (letzte 30 Tage)", f"{days_30} Tage")
+        a3.metric("Trainingstage gesamt", f"{days_total} Tage")
+
+        week_counts = (
+            df.assign(woche=df["datum_dt"].dt.to_period("W").dt.start_time)
+            .groupby("woche", as_index=False)
+            .agg(trainingstage=("datum", "nunique"), saetze=("uebung", "count"))
+            .sort_values("woche")
+        )
+        bar_act = (
+            alt.Chart(week_counts)
+            .mark_bar(color="#2dd4bf", cornerRadiusTopLeft=6, cornerRadiusTopRight=6)
+            .encode(
+                x=alt.X("woche:T", title="Wochenstart"),
+                y=alt.Y("trainingstage:Q", title="Trainingstage / Woche", axis=alt.Axis(tickMinStep=1)),
+                tooltip=[
+                    alt.Tooltip("woche:T", title="Woche ab"),
+                    alt.Tooltip("trainingstage:Q", title="Trainingstage"),
+                    alt.Tooltip("saetze:Q", title="Sätze"),
+                ],
+            )
+            .properties(height=240)
+            .configure_view(strokeOpacity=0)
+            .configure_axis(
+                gridColor="rgba(148,163,184,0.12)",
+                labelColor="#94a3b8",
+                titleColor="#cbd5e1",
+            )
+        )
+        st.altair_chart(bar_act, use_container_width=True)
+
+        log_days = (
+            df.groupby(["datum", "trainingstag"], as_index=False)
+            .agg(
+                uebungen=("uebung", "nunique"),
+                saetze=("uebung", "count"),
+                volumen_kg=("volumen_kg", "sum"),
+            )
+            .sort_values("datum", ascending=False)
+        )
+        st.dataframe(log_days, use_container_width=True, hide_index=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ==============================================================================
+# 4. KÖRPERGEWICHT & VERLAUF
+# ==============================================================================
+elif view == "weight":
+    st.markdown('<div class="surface-card">', unsafe_allow_html=True)
+    st.markdown("### Körpergewicht erfassen & Verlauf ansehen")
+
+    with st.form("bw_form", clear_on_submit=True):
+        bc1, bc2, bc3 = st.columns([1.2, 1.2, 1.0])
+        bw_date = bc1.date_input("Datum", value=today)
+        bw_kg = bc2.number_input("Gewicht (kg)", min_value=20.0, max_value=350.0, value=73.0, step=0.1)
+        bw_submit = bc3.form_submit_button("Gewicht speichern", use_container_width=True)
+        if bw_submit:
+            st.session_state.bodyweight_logs.append({"datum": bw_date.isoformat(), "gewicht_kg": float(bw_kg)})
+            st.session_state.bodyweight_logs.sort(key=lambda x: x["datum"])
+            save_json(WEIGHT_FILE, st.session_state.bodyweight_logs)
+            st.success("Körpergewicht gespeichert.")
+            st.rerun()
+
+    if st.session_state.bodyweight_logs:
+        bw_df = pd.DataFrame(st.session_state.bodyweight_logs)
+        bw_df["datum_dt"] = pd.to_datetime(bw_df["datum"])
+        bw_chart = (
+            alt.Chart(bw_df)
+            .mark_line(point=alt.OverlayMarkDef(color="#f59e0b", size=65), color="#f59e0b", strokeWidth=3)
+            .encode(
+                x=alt.X("datum_dt:T", title="Datum"),
+                y=alt.Y("gewicht_kg:Q", title="Körpergewicht (kg)", scale=alt.Scale(zero=False)),
+                tooltip=[alt.Tooltip("datum:N", title="Datum"), alt.Tooltip("gewicht_kg:Q", title="kg")],
+            )
+            .properties(height=250)
+            .configure_view(strokeOpacity=0)
+            .configure_axis(
+                gridColor="rgba(148,163,184,0.12)",
+                labelColor="#94a3b8",
+                titleColor="#cbd5e1",
+            )
+        )
+        st.altair_chart(bw_chart, use_container_width=True)
+        st.dataframe(bw_df[["datum", "gewicht_kg"]].sort_values("datum", ascending=False), use_container_width=True, hide_index=True)
+    else:
+        st.info("Noch keine Gewichtseinträge vorhanden.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ==============================================================================
+# 5. ÜBUNGEN & MUSKELGRUPPEN
+# ==============================================================================
+elif view == "exercises":
+    st.markdown('<div class="surface-card">', unsafe_allow_html=True)
+    st.markdown("### Übungen & Muskelgruppen")
+
+    mg_names = list(MUSCLE_GROUPS.keys())
+    picked_mg = st.selectbox("Muskelgruppe wählen", mg_names)
+    mg_info = MUSCLE_GROUPS[picked_mg]
+
+    m_left, m_right = st.columns([1.25, 1.0], gap="large")
+    with m_left:
+        st.markdown(f"**Primär:** {mg_info['primaer']}")
+        st.markdown(f"**Sekundär:** {mg_info['sekundaer']}")
+        st.write("")
+        for ex in mg_info["exercises"]:
+            is_sel = ex in st.session_state.selected_exercises
+            checked = st.checkbox(ex, value=is_sel, key=f"ex_chk_{picked_mg}_{ex}")
+            if checked and not is_sel:
+                st.session_state.selected_exercises.append(ex)
+                save_json(EXERCISES_FILE, st.session_state.selected_exercises)
+            elif not checked and is_sel:
+                st.session_state.selected_exercises.remove(ex)
+                save_json(EXERCISES_FILE, st.session_state.selected_exercises)
+
+    with m_right:
+        st.markdown(render_muscle_svg(mg_info["highlight"]), unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ==============================================================================
+# 6. SUPPLEMENTE & STACK
+# ==============================================================================
+elif view == "supps":
+    st.markdown('<div class="surface-card">', unsafe_allow_html=True)
+    st.markdown("### Supplemente & dein aktiver Stack")
+
+    for supp in SUPPLEMENTS_CATALOG:
+        name = supp["name"]
+        is_active = name in st.session_state.active_supps
+        card_cls = "supp-card supp-card-active" if is_active else "supp-card"
+        badge_mine = '<span class="badge-mine">Im Stack</span>' if is_active else ""
+
         st.markdown(
             f"""
-            <div class="supp-detail">
-                <strong>Primäre Muskeln:</strong> {group_info["primaer"]}<br>
-                <strong>Sekundäre Beteiligung:</strong> {group_info["sekundaer"]}
+            <div class="{card_cls}">
+                <span class="badge-cat">{supp["kategorie"]}</span>{badge_mine}
+                <div class="supp-heading">{name}</div>
+                <div style="font-size:0.88rem; color:#e2e8f0;">{supp["wirkung"]}</div>
+                <div class="supp-detail">
+                    <strong>Einnahme:</strong> {supp["einnahme"]}<br>
+                    <strong>Tipp:</strong> {supp["tipp"]}
+                </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
-
-    with col_list:
-        st.markdown(f"#### 10 Standard-Übungen · {chosen_group}")
-        b_col1, b_col2 = st.columns(2)
-        if b_col1.button("Alle 10 der Gruppe aktivieren", key=f"all_{chosen_group}"):
-            updated = set(st.session_state.selected_exercises)
-            updated.update(group_info["exercises"])
-            st.session_state.selected_exercises = sorted(updated)
-            save_json(EXERCISES_FILE, st.session_state.selected_exercises)
-            st.rerun()
-        if b_col2.button("Alle 10 der Gruppe abwählen", key=f"none_{chosen_group}"):
-            updated = [ex for ex in st.session_state.selected_exercises if ex not in group_info["exercises"]]
-            st.session_state.selected_exercises = updated
-            save_json(EXERCISES_FILE, st.session_state.selected_exercises)
-            st.rerun()
-
-        changed_ex = False
-        current_set = set(st.session_state.selected_exercises)
-        for idx, ex_name in enumerate(group_info["exercises"]):
-            is_checked = ex_name in current_set
-            new_checked = st.checkbox(
-                f"{idx + 1}. {ex_name}",
-                value=is_checked,
-                key=f"cb_ex_{chosen_group}_{idx}_{ex_name}",
-            )
-            if new_checked and not is_checked:
-                current_set.add(ex_name)
-                changed_ex = True
-            elif not new_checked and is_checked:
-                current_set.discard(ex_name)
-                changed_ex = True
-
-        if changed_ex:
-            st.session_state.selected_exercises = sorted(current_set)
-            save_json(EXERCISES_FILE, st.session_state.selected_exercises)
-            st.rerun()
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with tab_weight:
-    col_w_form, col_w_stats = st.columns([1.0, 1.45], gap="large")
-
-    with col_w_form:
-        st.markdown("### Körpergewicht eintragen")
-        with st.form("bodyweight_form", clear_on_submit=True):
-            bw_date = st.date_input("Datum", value=today, key="bw_date_input")
-            bw_rhythm = st.radio(
-                "Eintragsrhythmus",
-                ["Täglich", "Wöchentlich"],
-                horizontal=True,
-            )
-            bw_kg = st.number_input(
-                "Körpergewicht (kg)",
-                min_value=25.0,
-                max_value=300.0,
-                value=75.0,
-                step=0.1,
-                format="%.1f",
-            )
-            bw_note = st.text_input(
-                "Notiz (optional)",
-                placeholder="z. B. morgens nüchtern, nach Wochenend-Essen",
-            )
-            bw_save = st.form_submit_button("Gewicht speichern", use_container_width=True)
-            if bw_save:
-                st.session_state.bodyweight_logs.append({
-                    "datum": bw_date.isoformat(),
-                    "rhythmus": bw_rhythm,
-                    "gewicht_kg": round(float(bw_kg), 1),
-                    "notiz": bw_note.strip(),
-                })
-                save_json(WEIGHT_FILE, st.session_state.bodyweight_logs)
-                st.success(f"Körpergewicht gespeichert: {bw_kg:.1f} kg ({bw_rhythm})")
-                st.rerun()
-
-    with col_w_stats:
-        st.markdown('<div class="surface-card">', unsafe_allow_html=True)
-        st.markdown("### Statistik zur Körpergewichts-Veränderung")
-        if st.session_state.bodyweight_logs:
-            bw_df = pd.DataFrame(st.session_state.bodyweight_logs)
-            bw_df["datum_dt"] = pd.to_datetime(bw_df["datum"])
-            bw_df = bw_df.sort_values("datum_dt")
-
-            rhythm_filter = st.radio(
-                "Messungen anzeigen",
-                ["Alle Einträge", "Nur Täglich", "Nur Wöchentlich"],
-                horizontal=True,
-                key="bw_filter_radio",
-            )
-            view_bw = bw_df.copy()
-            if rhythm_filter == "Nur Täglich":
-                view_bw = view_bw[view_bw["rhythmus"] == "Täglich"]
-            elif rhythm_filter == "Nur Wöchentlich":
-                view_bw = view_bw[view_bw["rhythmus"] == "Wöchentlich"]
-
-            if not view_bw.empty:
-                bw_chart = (
-                    alt.Chart(view_bw)
-                    .mark_line(point=alt.OverlayMarkDef(color="#a855f7", size=65), color="#a855f7", strokeWidth=3)
-                    .encode(
-                        x=alt.X("datum_dt:T", title="Datum"),
-                        y=alt.Y("gewicht_kg:Q", title="Körpergewicht (kg)", scale=alt.Scale(zero=False)),
-                        tooltip=[
-                            alt.Tooltip("datum:N", title="Datum"),
-                            alt.Tooltip("rhythmus:N", title="Rhythmus"),
-                            alt.Tooltip("gewicht_kg:Q", title="Gewicht (kg)"),
-                            alt.Tooltip("notiz:N", title="Notiz"),
-                        ],
-                    )
-                    .properties(height=250)
-                    .configure_view(strokeOpacity=0)
-                    .configure_axis(
-                        gridColor="rgba(148,163,184,0.12)",
-                        labelColor="#94a3b8",
-                        titleColor="#cbd5e1",
-                    )
-                )
-                st.altair_chart(bw_chart, use_container_width=True)
-
-                start_bw = float(view_bw["gewicht_kg"].iloc[0])
-                curr_bw = float(view_bw["gewicht_kg"].iloc[-1])
-                delta_bw = curr_bw - start_bw
-                pct_bw = (delta_bw / start_bw * 100.0) if start_bw > 0 else 0.0
-
-                w1, w2, w3, w4 = st.columns(4)
-                w1.metric("Startgewicht", f"{start_bw:.1f} kg")
-                w2.metric("Aktuell", f"{curr_bw:.1f} kg")
-                w3.metric("Veränderung", f"{delta_bw:+.1f} kg", delta=f"{delta_bw:+.1f} kg")
-                w4.metric("In Prozent", f"{pct_bw:+.1f} %")
-
-            st.markdown("#### Gespeicherte Gewichtseinträge")
-            bw_cols = [c for c in ["datum", "rhythmus", "gewicht_kg", "notiz"] if c in bw_df.columns]
-            st.dataframe(bw_df.sort_values("datum", ascending=False)[bw_cols], use_container_width=True, hide_index=True)
-
-            with st.expander("Gewichtseintrag löschen"):
-                bw_labels = [
-                    f"#{i + 1} · {item.get('datum')} · {item.get('gewicht_kg')} kg ({item.get('rhythmus', '-')})"
-                    for i, item in enumerate(st.session_state.bodyweight_logs)
-                ]
-                pick_bw_del = st.selectbox("Eintrag wählen", bw_labels, key="bw_del_select")
-                if st.button("Gewichtseintrag löschen"):
-                    st.session_state.bodyweight_logs.pop(bw_labels.index(pick_bw_del))
-                    save_json(WEIGHT_FILE, st.session_state.bodyweight_logs)
-                    st.rerun()
-        else:
-            st.info(
-                "Noch kein Körpergewicht eingetragen. Trag links deinen ersten Wert ein, um Verlauf und Veränderung zu sehen."
-            )
-        st.markdown("</div>", unsafe_allow_html=True)
-
-with tab_history:
-    st.markdown('<div class="surface-card">', unsafe_allow_html=True)
-    st.markdown("### Fortschritt über Monate & Jahre")
-    if st.session_state.entries:
-        df = pd.DataFrame(st.session_state.entries)
-        df["datum_dt"] = pd.to_datetime(df["datum"])
-        df["monat"] = df["datum_dt"].dt.to_period("M").astype(str)
-        exercises = sorted(df["uebung"].dropna().unique())
-
-        c_ex, c_mode = st.columns([1.2, 1.8])
-        ex_pick = c_ex.selectbox("Übung wählen", exercises, key="hist_ex")
-        mode_pick = c_mode.radio(
-            "Darstellung",
-            ["Monats-Maximalgewicht (Balken)", "Alle Einträge (Verlauf)"],
-            horizontal=True,
+        toggle_val = st.checkbox(
+            "In meinem Stack aktiv",
+            value=is_active,
+            key=f"supp_chk_{name}",
         )
+        if toggle_val and not is_active:
+            st.session_state.active_supps.append(name)
+            save_json(STACK_FILE, st.session_state.active_supps)
+            st.rerun()
+        elif not toggle_val and is_active:
+            st.session_state.active_supps.remove(name)
+            save_json(STACK_FILE, st.session_state.active_supps)
+            st.rerun()
 
-        sub = df[df["uebung"] == ex_pick].sort_values("datum_dt")
-        if mode_pick == "Monats-Maximalgewicht (Balken)":
-            m_df = sub.groupby("monat", as_index=False)["gewicht_kg"].max()
-            bars = (
-                alt.Chart(m_df)
-                .mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color="#a855f7")
-                .encode(
-                    x=alt.X("monat:N", title="Monat"),
-                    y=alt.Y("gewicht_kg:Q", title="Max. Gewicht (kg)", scale=alt.Scale(zero=False)),
-                    tooltip=["monat", "gewicht_kg"],
-                )
-                .properties(height=300)
-                .configure_view(strokeOpacity=0)
-                .configure_axis(
-                    gridColor="rgba(148,163,184,0.12)",
-                    labelColor="#94a3b8",
-                    titleColor="#cbd5e1",
-                )
-            )
-            st.altair_chart(bars, use_container_width=True)
-        else:
-            st.line_chart(sub.set_index("datum_dt")[["gewicht_kg"]], height=300)
-
-        st.markdown("#### Alle gespeicherten Sätze")
-        filter_ex = st.selectbox(
-            "Nach Übung filtern",
-            ["Alle Übungen"] + exercises,
-            key="hist_filter",
-        )
-        show_df = df.sort_values("datum", ascending=False)
-        if filter_ex != "Alle Übungen":
-            show_df = show_df[show_df["uebung"] == filter_ex]
-
-        cols = [
-            c
-            for c in [
-                "datum",
-                "trainingstag",
-                "uebung",
-                "saetze",
-                "wiederholungen",
-                "gewicht_kg",
-                "volumen_kg",
-                "geschaetzt_1rm_kg",
-                "notiz",
-            ]
-            if c in show_df.columns
-        ]
-        st.dataframe(show_df[cols], use_container_width=True, hide_index=True)
-
-        with st.expander("Eintrag löschen"):
-            labels = [
-                f"#{i + 1} · {e.get('datum')} · {e.get('uebung')} · {e.get('gewicht_kg')} kg"
-                for i, e in enumerate(st.session_state.entries)
-            ]
-            chosen_del = st.selectbox("Eintrag auswählen", labels)
-            if st.button("Ausgewählten Eintrag löschen"):
-                st.session_state.entries.pop(labels.index(chosen_del))
-                save_json(DATA_FILE, st.session_state.entries)
-                st.rerun()
-    else:
-        st.info("Noch keine Einträge gespeichert.")
     st.markdown("</div>", unsafe_allow_html=True)
-
-with tab_supps:
-    st.markdown('<div class="surface-card">', unsafe_allow_html=True)
-    st.markdown("### Dein persönlicher Supplement-Stack")
-    st.caption(
-        "Wähle einzelne Supplemente direkt an oder ab – dein Stack speichert sich automatisch. Basis bleiben immer Training, Schlaf und Ernährung."
-    )
-
-    names_list = [s["name"] for s in SUPPLEMENTS_CATALOG]
-    current_defaults = [s for s in st.session_state.active_supps if s in names_list]
-
-    picked_supps = st.multiselect(
-        "Schnellauswahl über Liste",
-        options=names_list,
-        default=current_defaults,
-    )
-
-    if picked_supps != st.session_state.active_supps:
-        st.session_state.active_supps = list(picked_supps)
-        save_json(STACK_FILE, st.session_state.active_supps)
-        st.rerun()
-
-    if st.session_state.active_supps:
-        st.success("Aktuell aktiv: " + " · ".join(st.session_state.active_supps))
-    else:
-        st.info("Derzeit keine Supplemente ausgewählt.")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    f1, f2 = st.columns([1.2, 1.8])
-    cat_options = ["Alle Kategorien"] + sorted({s["kategorie"] for s in SUPPLEMENTS_CATALOG})
-    selected_cat = f1.selectbox("Kategorie filtern", cat_options)
-    only_selected = f2.checkbox("Nur meine ausgewählten Supplemente anzeigen", value=False)
-
-    cards_to_show = SUPPLEMENTS_CATALOG
-    if only_selected:
-        cards_to_show = [s for s in cards_to_show if s["name"] in st.session_state.active_supps]
-    if selected_cat != "Alle Kategorien":
-        cards_to_show = [s for s in cards_to_show if s["kategorie"] == selected_cat]
-
-    supp_changed = False
-    active_set = set(st.session_state.active_supps)
-
-    for idx in range(0, len(cards_to_show), 2):
-        row_cols = st.columns(2, gap="large")
-        for col_i in range(2):
-            if idx + col_i < len(cards_to_show):
-                supp = cards_to_show[idx + col_i]
-                is_active = supp["name"] in active_set
-                card_class = "supp-card supp-card-active" if is_active else "supp-card"
-                mine_badge = '<span class="badge-mine">AKTIV</span>' if is_active else ""
-
-                with row_cols[col_i]:
-                    st.markdown(
-                        f"""
-                        <div class="{card_class}">
-                            <span class="badge-cat">{supp["kategorie"]}</span>{mine_badge}
-                            <h4 class="supp-heading">{supp["name"]}</h4>
-                            <p style="color:#cbd5e1; margin:0 0 8px 0; line-height:1.5;">{supp["wirkung"]}</p>
-                            <div class="supp-detail">
-                                <strong>Typischer Einsatz:</strong> {supp["einnahme"]}<br>
-                                <strong>Praxistipp:</strong> {supp["tipp"]}
-                            </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                    toggle_val = st.checkbox(
-                        "Nehme ich aktuell",
-                        value=is_active,
-                        key=f"supp_toggle_{supp['name']}",
-                    )
-                    if toggle_val and not is_active:
-                        active_set.add(supp["name"])
-                        supp_changed = True
-                    elif not toggle_val and is_active:
-                        active_set.discard(supp["name"])
-                        supp_changed = True
-
-    if supp_changed:
-        st.session_state.active_supps = [n for n in names_list if n in active_set]
-        save_json(STACK_FILE, st.session_state.active_supps)
-        st.rerun()
