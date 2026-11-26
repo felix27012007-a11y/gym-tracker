@@ -437,8 +437,6 @@ APP_CSS = """
         filter: brightness(1.07);
     }
 </style>
-        }
-    }
 """
 
 
