@@ -1359,7 +1359,11 @@ elif view == "supps":
             st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
-    elif view == "manage":
+    
+  # ==============================================================================
+# 7. GESPEICHERTE WORKOUTS ANSEHEN & BEARBEITEN
+# ==============================================================================
+elif view == "manage":
     st.markdown('<div class="surface-card">', unsafe_allow_html=True)
     st.markdown("### Gespeicherte Workouts einsehen & bearbeiten")
 
