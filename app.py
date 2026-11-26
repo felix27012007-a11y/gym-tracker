@@ -447,61 +447,6 @@ APP_CSS = """
             transform: translateY(0) scale(1);
         }
     }
-
-    .block-container > div[data-testid="stVerticalBlock"] > div {
-        animation: appleFadeSlideIn 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
-    }
-
-    .surface-card,
-    .stat-tile,
-    .supp-card,
-    .draft-item,
-    .day-pill {
-        transition:
-            transform 0.24s cubic-bezier(0.22, 1, 0.36, 1),
-            border-color 0.24s ease,
-            box-shadow 0.24s ease,
-            background-color 0.24s ease;
-        will-change: transform, opacity;
-    }
-
-    .stat-tile:hover,
-    .supp-card:hover,
-    .draft-item:hover {
-        transform: translateY(-2px);
-        border-color: rgba(94, 234, 212, 0.28);
-        box-shadow: 0 18px 36px rgba(0, 0, 0, 0.42);
-    }
-
-    button[data-testid="stBaseButton-secondaryFormSubmit"],
-    button[data-testid="stBaseButton-primary"],
-    button[data-testid="stBaseButton-secondary"] {
-        border-radius: 14px !important;
-        transition:
-            transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
-            filter 0.18s ease,
-            box-shadow 0.18s ease,
-            background-color 0.18s ease !important;
-    }
-
-    button[data-testid="stBaseButton-secondaryFormSubmit"]:hover,
-    button[data-testid="stBaseButton-primary"]:hover,
-    button[data-testid="stBaseButton-secondary"]:hover {
-        transform: translateY(-1px);
-        filter: brightness(1.06);
-    }
-
-    button[data-testid="stBaseButton-secondaryFormSubmit"]:active,
-    button[data-testid="stBaseButton-primary"]:active,
-    button[data-testid="stBaseButton-secondary"]:active {
-        transform: scale(0.97) !important;
-        filter: brightness(0.97);
-    }
-
-    div[data-testid="stMarkdownContainer"] {
-        transition: opacity 0.2s ease;
-    }
-
     @media (prefers-reduced-motion: reduce) {
         * {
             animation: none !important;
