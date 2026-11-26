@@ -1423,7 +1423,6 @@ elif view == "supps":
         if toggle_val and not is_active:
             st.session_state.active_supps.append(name)
             save_json(STACK_FILE, st.session_state.active_supps)
-            st.rerun()
         elif not toggle_val and is_active:
             st.session_state.active_supps.remove(name)
             save_json(STACK_FILE, st.session_state.active_supps)
