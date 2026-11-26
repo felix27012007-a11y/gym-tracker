@@ -437,20 +437,6 @@ APP_CSS = """
         filter: brightness(1.07);
     }
 </style>
-@keyframes appleFadeSlideIn {
-        0% {
-            opacity: 0;
-            transform: translateY(10px) scale(0.992);
-        }
-        100% {
-            opacity: 1;
-            transform: translateY(0) scale(1);
-        }
-    }
-    @media (prefers-reduced-motion: reduce) {
-        * {
-            animation: none !important;
-            transition: none !important;
         }
     }
 """
