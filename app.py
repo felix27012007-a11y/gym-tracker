@@ -1359,3 +1359,115 @@ elif view == "supps":
             st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
+    elif view == "manage":
+    st.markdown('<div class="surface-card">', unsafe_allow_html=True)
+    st.markdown("### Gespeicherte Workouts einsehen & bearbeiten")
+
+    if not st.session_state.entries:
+        st.info("Noch keine Workouts in der Datenbank vorhanden.")
+    else:
+        entries_sorted = sorted(
+            st.session_state.entries,
+            key=lambda x: (str(x.get("datum", "")), int(x.get("id", 0))),
+            reverse=True,
+        )
+
+        filter_ex = st.selectbox(
+            "Nach Übung filtern (optional)",
+            ["Alle Übungen"] + sorted({e["uebung"] for e in entries_sorted if e.get("uebung")}),
+            key="manage_filter_ex",
+        )
+        if filter_ex != "Alle Übungen":
+            filtered_list = [e for e in entries_sorted if e.get("uebung") == filter_ex]
+        else:
+            filtered_list = entries_sorted
+
+        st.dataframe(
+            pd.DataFrame(filtered_list)[
+                ["id", "datum", "trainingstag", "uebung", "gewicht_kg", "wiederholungen", "volumen_kg", "notiz"]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.divider()
+        st.markdown("#### Eintrag auswählen und korrigieren")
+
+        option_map = {
+            f"#{e['id']} · {e['datum']} · {e['uebung']} ({e['gewicht_kg']:g} kg × {e['wiederholungen']})": e
+            for e in filtered_list
+            if e.get("id") is not None
+        }
+        chosen_key = st.selectbox("Eintrag zum Bearbeiten wählen", list(option_map.keys()), key="edit_pick_entry")
+        target = option_map[chosen_key]
+
+        try:
+            parsed_date = date.fromisoformat(str(target["datum"])[:10])
+        except ValueError:
+            parsed_date = today
+
+        with st.form(f"edit_workout_form_{target['id']}"):
+            ec1, ec2 = st.columns([1.2, 1.8])
+            new_date = ec1.date_input("Datum", value=parsed_date)
+            new_ex = ec2.text_input("Übung", value=str(target["uebung"]))
+
+            ec3, ec4, ec5 = st.columns(3)
+            new_weight = ec3.number_input(
+                "Gewicht (kg)",
+                min_value=0.0,
+                max_value=1000.0,
+                value=float(target["gewicht_kg"]),
+                step=2.5,
+            )
+            new_reps = ec4.number_input(
+                "Wiederholungen",
+                min_value=1,
+                max_value=200,
+                value=int(target["wiederholungen"]),
+                step=1,
+            )
+            new_split = ec5.text_input("Trainingstag / Split", value=str(target.get("trainingstag") or "Trainingstag"))
+
+            new_note = st.text_input("Notiz", value=str(target.get("notiz") or ""))
+
+            save_btn, del_btn = st.columns([2, 1])
+            do_save = save_btn.form_submit_button("💾 Änderungen speichern", use_container_width=True)
+            do_delete = del_btn.form_submit_button("🗑️ Löschen", use_container_width=True)
+
+            if do_save:
+                clean_ex = new_ex.strip()
+                if not clean_ex:
+                    st.warning("Der Übungsname darf nicht leer sein.")
+                else:
+                    update_workout_db(
+                        int(target["id"]),
+                        new_date.isoformat(),
+                        clean_ex,
+                        float(new_weight),
+                        int(new_reps),
+                    )
+                    for item in st.session_state.entries:
+                        if int(item.get("id", -1)) == int(target["id"]):
+                            item["datum"] = new_date.isoformat()
+                            item["uebung"] = clean_ex
+                            item["gewicht_kg"] = float(new_weight)
+                            item["wiederholungen"] = int(new_reps)
+                            item["trainingstag"] = new_split.strip() or "Trainingstag"
+                            item["volumen_kg"] = round(float(new_weight) * int(new_reps), 1)
+                            item["geschaetzt_1rm_kg"] = round(estimate_1rm(float(new_weight), int(new_reps)), 1)
+                            item["notiz"] = new_note.strip()
+                            break
+                    save_json(DATA_FILE, st.session_state.entries)
+                    st.success("Eintrag in Supabase und App aktualisiert!")
+                    st.rerun()
+
+            if do_delete:
+                delete_workout_db(int(target["id"]))
+                st.session_state.entries = [
+                    item for item in st.session_state.entries if int(item.get("id", -1)) != int(target["id"])
+                ]
+                save_json(DATA_FILE, st.session_state.entries)
+                st.success("Eintrag gelöscht.")
+                st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
