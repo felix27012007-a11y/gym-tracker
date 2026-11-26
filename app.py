@@ -499,17 +499,18 @@ def load_workouts_db():
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT datum, uebung, gewicht, wiederholungen FROM workouts ORDER BY id ASC")
+            cur.execute("SELECT id, datum, uebung, gewicht, wiederholungen FROM workouts ORDER BY id ASC")
             rows = cur.fetchall()
 
         local_meta = load_list(DATA_FILE, [])
         meta_idx = 0
         result = []
-        for idx, r in enumerate(rows, start=1):
-            datum_val = str(r[0])
-            uebung_val = str(r[1])
-            gewicht_val = float(r[2])
-            wdh_val = int(r[3])
+        for r in rows:
+            db_id = int(r[0])
+            datum_val = str(r[1])
+            uebung_val = str(r[2])
+            gewicht_val = float(r[3])
+            wdh_val = int(r[4])
 
             split_val = infer_split_from_exercise(uebung_val)
             satz_nr = 1
@@ -523,7 +524,7 @@ def load_workouts_db():
                     meta_idx += 1
 
             result.append({
-                "id": idx,
+                "id": db_id,
                 "datum": datum_val,
                 "trainingstag": split_val,
                 "uebung": uebung_val,
@@ -539,6 +540,32 @@ def load_workouts_db():
     finally:
         conn.close()
 
+
+def update_workout_db(workout_id: int, datum_str: str, uebung_str: str, gewicht_val: float, wdh_val: int):
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE workouts
+                SET datum = %s, uebung = %s, gewicht = %s, wiederholungen = %s
+                WHERE id = %s
+                """,
+                (datum_str, uebung_str, float(gewicht_val), int(wdh_val), int(workout_id)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_workout_db(workout_id: int):
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM workouts WHERE id = %s", (int(workout_id),))
+        conn.commit()
+    finally:
+        conn.close()
 
 def save_workout_db(datum_str, uebung_str, gewicht_val, wdh_val):
     conn = get_db_connection()
