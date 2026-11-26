@@ -567,8 +567,47 @@ def render_muscle_svg(highlight_key: str) -> str:
     legs_f = active_fill if highlight_key == "legs" else base_fill
     legs_b = active_fill if highlight_key == "legs" else (sec_fill if highlight_key == "back" else base_fill)
 
-    return f"""
-    <div class="anatomy-box">
+    svg = (
+        f'<svg viewBox="0 0 340 210" width="100%" height="205" xmlns="http://www.w3.org/2000/svg">'
+        f'<text x="85" y="18" fill="#94a3b8" font-size="11" font-weight="700" text-anchor="middle">VORDERSEITE</text>'
+        f'<circle cx="85" cy="36" r="11" fill="#334155"/>'
+        f'<rect x="78" y="47" width="14" height="7" rx="3" fill="#334155"/>'
+        f'<rect x="65" y="55" width="19" height="22" rx="6" fill="{chest_c}"/>'
+        f'<rect x="86" y="55" width="19" height="22" rx="6" fill="{chest_c}"/>'
+        f'<ellipse cx="57" cy="61" rx="8" ry="9" fill="{shoulders_f}"/>'
+        f'<ellipse cx="113" cy="61" rx="8" ry="9" fill="{shoulders_f}"/>'
+        f'<rect x="47" y="72" width="10" height="24" rx="5" fill="{biceps_c}"/>'
+        f'<rect x="113" y="72" width="10" height="24" rx="5" fill="{biceps_c}"/>'
+        f'<rect x="44" y="99" width="9" height="28" rx="4" fill="#1e293b"/>'
+        f'<rect x="117" y="99" width="9" height="28" rx="4" fill="#1e293b"/>'
+        f'<rect x="69" y="79" width="32" height="36" rx="7" fill="#1e293b"/>'
+        f'<rect x="67" y="118" width="15" height="44" rx="7" fill="{legs_f}"/>'
+        f'<rect x="88" y="118" width="15" height="44" rx="7" fill="{legs_f}"/>'
+        f'<rect x="68" y="165" width="13" height="34" rx="6" fill="{legs_f}"/>'
+        f'<rect x="89" y="165" width="13" height="34" rx="6" fill="{legs_f}"/>'
+        f'<text x="255" y="18" fill="#94a3b8" font-size="11" font-weight="700" text-anchor="middle">RÜCKSEITE</text>'
+        f'<circle cx="255" cy="36" r="11" fill="#334155"/>'
+        f'<rect x="248" y="47" width="14" height="7" rx="3" fill="#334155"/>'
+        f'<polygon points="234,55 276,55 268,108 242,108" fill="{back_c}"/>'
+        f'<ellipse cx="227" cy="61" rx="8" ry="9" fill="{shoulders_b}"/>'
+        f'<ellipse cx="283" cy="61" rx="8" ry="9" fill="{shoulders_b}"/>'
+        f'<rect x="217" y="72" width="10" height="24" rx="5" fill="{triceps_c}"/>'
+        f'<rect x="283" y="72" width="10" height="24" rx="5" fill="{triceps_c}"/>'
+        f'<rect x="214" y="99" width="9" height="28" rx="4" fill="#1e293b"/>'
+        f'<rect x="287" y="99" width="9" height="28" rx="4" fill="#1e293b"/>'
+        f'<rect x="237" y="118" width="15" height="44" rx="7" fill="{legs_b}"/>'
+        f'<rect x="258" y="118" width="15" height="44" rx="7" fill="{legs_b}"/>'
+        f'<rect x="238" y="165" width="13" height="34" rx="6" fill="{legs_b}"/>'
+        f'<rect x="259" y="165" width="13" height="34" rx="6" fill="{legs_b}"/>'
+        f'</svg>'
+    )
+    legend = (
+        '<div style="font-size:0.76rem; color:#94a3b8; margin-top:4px;">'
+        '<span style="color:#2dd4bf; font-weight:700;">■ Primär</span> &nbsp;·&nbsp;'
+        '<span style="color:#a855f7; font-weight:700;">■ Sekundär / Fokus</span>'
+        '</div>'
+    )
+    return f'<div class="anatomy-box">{svg}{legend}</div>'
         <svg viewBox="0 0 340 210" width="100%" height="205" xmlns="http://www.w3.org/2000/svg">
             <text x="85" y="18" fill="#94a3b8" font-size="11" font-weight="700" text-anchor="middle">VORDERSEITE</text>
             <circle cx="85" cy="36" r="11" fill="#334155"/>
